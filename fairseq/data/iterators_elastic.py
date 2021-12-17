@@ -85,9 +85,8 @@ class ElasticEpochBatchIterator(EpochBatchIterator):
                 batches = shuffle_batches(list(self.frozen_batches), self.seed + epoch)
             else:
                 batches = self.frozen_batches
-            batches = list(
-                ShardedIterator(batches, self.num_shards, self.shard_id, fill_value=[])
-            )
+            itr = ShardedIterator(batches, self.num_shards, self.shard_id, fill_value=[])
+            batches = list(itr)
 
         if offset > 0 and offset >= len(batches):
             return None
@@ -122,3 +121,43 @@ class ElasticEpochBatchIterator(EpochBatchIterator):
         itr = ProfilingIterator(itr, offset)
 
         return itr
+    
+    def state_dict(self):
+        """Returns a dictionary containing a whole state of the iterator."""
+        if self.end_of_epoch():
+            epoch = self.epoch + 1
+            iter_in_epoch = 0
+        else:
+            epoch = self.epoch
+            iter_in_epoch = self.iterations_in_epoch
+        return {
+            "version": 2,
+            "epoch": epoch,
+            "iterations_in_epoch": iter_in_epoch,
+            "shuffle": self.shuffle,
+        }
+
+    def load_state_dict(self, state_dict):
+        """Copies the state of the iterator from the given *state_dict*."""
+        self.epoch = state_dict["epoch"]
+        itr_pos = state_dict.get("iterations_in_epoch", 0)
+        version = state_dict.get("version", 1)
+        if itr_pos > 0:
+            # fast-forward epoch iterator
+            self._next_epoch_itr = self._get_iterator_for_epoch(
+                self.epoch,
+                shuffle=state_dict.get("shuffle", True),
+                offset=itr_pos,
+            )
+            if self._next_epoch_itr is None:
+                if version == 1:
+                    # legacy behavior: we finished the epoch, increment epoch counter
+                    self.epoch += 1
+                else:
+                    raise RuntimeError(
+                        "Cannot resume training due to dataloader mismatch, please "
+                        "report this to the fairseq developers. You can relaunch "
+                        "training with `--reset-dataloader` and it should work."
+                    )
+        else:
+            self._next_epoch_itr = None
