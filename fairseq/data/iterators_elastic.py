@@ -27,6 +27,24 @@ class ProfilingIterator(CountingIterator):
         profile_step_start(32)
         return batch    
 
+class GlobalCountingIterator(CountingIterator):
+    def __init__(self, iterable, num_replicas=1, start=None, total=None):
+        self.num_replicas = num_replicas
+        super().__init__(iterable, start, len(iterable) * self.num_replicas)
+
+    def __next__(self):
+        if not self.has_next():
+            raise StopIteration
+        try:
+            x = next(self._itr)
+        except StopIteration:
+            raise IndexError(
+                f"Iterator expected to have length {self.total}, "
+                "but exhausted at position {self.n}."
+            )
+        self.n += self.num_replicas
+        return x
+
 
 class ElasticEpochBatchIterator(EpochBatchIterator):
     def __init__(
@@ -74,7 +92,7 @@ class ElasticEpochBatchIterator(EpochBatchIterator):
                 batches = shuffle_batches(list(batches), self.seed + epoch)
 
             batches = list(
-                ShardedIterator(batches, self.num_shards, self.shard_id, fill_value=[])
+                ShardedIterator(batches[offset:], self.num_shards, self.shard_id, fill_value=[])
             )
             self.dataset.prefetch([i for s in batches for i in s])
 
@@ -85,8 +103,8 @@ class ElasticEpochBatchIterator(EpochBatchIterator):
                 batches = shuffle_batches(list(self.frozen_batches), self.seed + epoch)
             else:
                 batches = self.frozen_batches
-            itr = ShardedIterator(batches, self.num_shards, self.shard_id, fill_value=[])
-            batches = list(itr)
+
+            batches = list(ShardedIterator(batches[offset:], self.num_shards, self.shard_id, fill_value=[]))
 
         if offset > 0 and offset >= len(batches):
             return None
@@ -98,7 +116,7 @@ class ElasticEpochBatchIterator(EpochBatchIterator):
         itr = torch.utils.data.DataLoader(
             self.dataset,
             collate_fn=self.collate_fn,
-            batch_sampler=batches[offset:],
+            batch_sampler=batches,
             num_workers=self.num_workers,
             timeout=self.timeout,
             pin_memory=True,
@@ -108,8 +126,7 @@ class ElasticEpochBatchIterator(EpochBatchIterator):
         if self.buffer_size > 0:
             itr = BufferedIterator(self.buffer_size, itr)
 
-        # Wrap with CountingIterator
-        itr = CountingIterator(itr, start=offset)
+        itr = GlobalCountingIterator(itr, self.num_shards, offset)
 
         if self.skip_remainder_batch:
             # TODO: Below is a lazy implementation which discard the final batch regardless
@@ -118,7 +135,7 @@ class ElasticEpochBatchIterator(EpochBatchIterator):
             itr.take(total_num_itrs)
             logger.info(f"skip final residual batch, total_num_itrs = {total_num_itrs}")
 
-        itr = ProfilingIterator(itr, offset)
+        itr = ProfilingIterator(itr, itr.n)
 
         return itr
     
