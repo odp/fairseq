@@ -16,15 +16,17 @@ from adaptdl.torch._metrics import (
 
 
 class ProfilingIterator(CountingIterator):
-    def __init__(self, iterable, start=None, total=None):
+    def __init__(self, iterable, max_tokens, start=None, total=None):
+        assert max_tokens is not None
         self.start = start
+        self.max_tokens = max_tokens
         super().__init__(iterable, start, total)
 
     def __next__(self):
         if self.n > self.start:
             profile_step_commit(False)
         batch = super().__next__()
-        profile_step_start(32)
+        profile_step_start(self.max_tokens)
         return batch    
 
 class GlobalCountingIterator(CountingIterator):
@@ -50,6 +52,7 @@ class ElasticEpochBatchIterator(EpochBatchIterator):
     def __init__(
         self,
         dataset,
+        max_tokens,
         collate_fn,
         batch_sampler,
         seed=1,
@@ -63,6 +66,7 @@ class ElasticEpochBatchIterator(EpochBatchIterator):
         skip_remainder_batch=False,
         grouped_shuffling=False,
     ):
+        self.max_tokens = max_tokens
         super().__init__(dataset, collate_fn, batch_sampler, seed, num_shards,
                 shard_id, num_workers, epoch, buffer_size, timeout,
                 disable_shuffling, skip_remainder_batch, grouped_shuffling)
@@ -135,7 +139,7 @@ class ElasticEpochBatchIterator(EpochBatchIterator):
             itr.take(total_num_itrs)
             logger.info(f"skip final residual batch, total_num_itrs = {total_num_itrs}")
 
-        itr = ProfilingIterator(itr, itr.n)
+        itr = ProfilingIterator(itr, self.max_tokens, itr.n)
 
         return itr
     
