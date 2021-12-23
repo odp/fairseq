@@ -11,6 +11,7 @@ import threading
 import torch
 import torch.nn as nn
 from torch.nn.parallel import DistributedDataParallel
+import adaptdl.torch
 
 from fairseq.distributed import (
     DistributedTimeoutWrapper,
@@ -136,6 +137,20 @@ def DistributedFairseqModel(args, model, process_group, device):
             wrapped_model = wrapped_model.half()
         if not args.cpu_offload:
             wrapped_model = wrapped_model.to(device=device)
+    elif args.ddp_backend == "adaptdl":
+        wrapped_model = adaptdl.torch.AdaptiveDataParallel(
+            model=model.to(device),
+            optimizer=None,
+            device_ids=[args.device_id],
+            output_device=args.device_id,
+            broadcast_buffers=args.broadcast_buffers,
+            bucket_cap_mb=args.bucket_cap_mb,
+            process_group=process_group,
+            find_unused_parameters=args.find_unused_parameters,
+            gradient_as_bucket_view=args.gradient_as_bucket_view,
+        )
+        # forward missing getattr and state_dict/load_state_dict to orig model
+        wrapped_model = ModuleProxyWrapper(wrapped_model)
     else:
         raise ValueError("Unknown --ddp-backend: " + args.ddp_backend)
 

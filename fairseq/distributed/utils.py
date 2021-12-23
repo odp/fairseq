@@ -21,6 +21,7 @@ import torch
 import torch.distributed as dist
 from fairseq.dataclass.configs import DistributedTrainingConfig, FairseqConfig
 from omegaconf import open_dict
+import adaptdl.torch
 
 try:
     import torch_xla.core.xla_model as xm
@@ -335,7 +336,10 @@ def call_main(cfg: FairseqConfig, main, **kwargs):
     if cfg.distributed_training.distributed_init_method is None:
         infer_init_method(cfg.distributed_training)
 
-    if cfg.distributed_training.distributed_init_method is not None:
+    if cfg.distributed_training.ddp_backend == "adaptdl":
+        adaptdl.torch.init_process_group("nccl" if torch.cuda.is_available() else "gloo")
+        distributed_main(cfg.distributed_training.device_id, main, cfg, kwargs)
+    elif cfg.distributed_training.distributed_init_method is not None:
         # distributed training
         if not cfg.distributed_training.distributed_no_spawn:
             start_rank = cfg.distributed_training.distributed_rank
