@@ -12,6 +12,7 @@ from typing import Optional
 from argparse import Namespace
 from omegaconf import II
 
+import torch
 import numpy as np
 from fairseq import metrics, utils
 from fairseq.data import (
@@ -34,7 +35,8 @@ from fairseq.tasks.translation import (
     TranslationTask,
     load_langpair_dataset,
 )
-
+from fairseq.optim.amp_optimizer import AMPOptimizer
+import pdb
 
 logger = logging.getLogger(__name__)
 
@@ -149,7 +151,7 @@ class ElasticTranslationTask(TranslationTask):
         # create mini-batches with given size constraints
         batch_sampler = dataset.batch_by_size(
             indices,
-            max_tokens=max_tokens,
+            max_tokens=max_tokens, ### ???
             max_sentences=max_sentences,
             required_batch_size_multiple=required_batch_size_multiple,
         )
@@ -157,6 +159,7 @@ class ElasticTranslationTask(TranslationTask):
         # return a reusable, sharded iterator
         epoch_iter = iterators_elastic.ElasticEpochBatchIterator(
             dataset=dataset,
+            max_tokens=max_tokens,
             collate_fn=dataset.collater,
             batch_sampler=batch_sampler,
             seed=seed,
@@ -173,3 +176,37 @@ class ElasticTranslationTask(TranslationTask):
             self.dataset_to_epoch_iter[dataset] = epoch_iter
 
         return epoch_iter
+
+    def train_step(
+        self, sample, model, criterion, optimizer, update_num, ignore_grad=False
+    ):
+        """
+        Do forward and backward, and return the loss as computed by *criterion*
+        for the given *model* and *sample*.
+
+        Args:
+            sample (dict): the mini-batch. The format is defined by the
+                :class:`~fairseq.data.FairseqDataset`.
+            model (~fairseq.models.BaseFairseqModel): the model
+            criterion (~fairseq.criterions.FairseqCriterion): the criterion
+            optimizer (~fairseq.optim.FairseqOptimizer): the optimizer
+            update_num (int): the current update
+            ignore_grad (bool): multiply loss by 0 if this is set to True
+
+        Returns:
+            tuple:
+                - the loss
+                - the sample size, which is used as the denominator for the
+                  gradient
+                - logging outputs to display while training
+        """
+        model.train()
+        model.set_num_updates(update_num)
+        with torch.autograd.profiler.record_function("forward"):
+            with torch.cuda.amp.autocast(enabled=(isinstance(optimizer, AMPOptimizer))):
+                loss, sample_size, logging_output = criterion(model, sample)
+        if ignore_grad:
+            loss *= 0
+        with torch.autograd.profiler.record_function("backward"):
+            optimizer.backward(loss)
+        return loss, sample_size, logging_output

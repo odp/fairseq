@@ -202,7 +202,8 @@ class Trainer(object):
     def use_distributed_wrapper(self) -> bool:
         return (
             self.data_parallel_world_size > 1 and not self.cfg.optimization.use_bmuf
-        ) or (self.is_fsdp and self.cfg.distributed_training.cpu_offload)
+        ) or (self.is_fsdp and self.cfg.distributed_training.cpu_offload) \
+          or self.is_adatpdl
 
     @property
     def should_save_checkpoint_on_current_rank(self) -> bool:
@@ -366,6 +367,18 @@ class Trainer(object):
     @property
     def is_fsdp(self):
         return self.cfg.distributed_training.ddp_backend == "fully_sharded"
+
+    @property
+    def is_adatpdl(self):
+        return self.cfg.distributed_training.ddp_backend == "adaptdl"
+
+    def wrap_adaptdl(self):
+        import adaptdl.torch as adl
+        from fairseq.distributed import ModuleProxyWrapper
+        wrapped_model = adl.AdaptiveDataParallel(self.get_model().to(self.device),
+                                                 self.optimizer,
+                                                 self.lr_scheduler)
+        self._wrapped_model = ModuleProxyWrapper(wrapped_model)
 
     def consolidate_optimizer(self):
         """For OSS, we need to consolidate the state dict."""

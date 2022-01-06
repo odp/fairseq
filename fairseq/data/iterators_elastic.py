@@ -10,10 +10,10 @@ import time
 import pdb
 
 
+from adaptdl.torch.data import AdaptiveDataLoaderMixin
 from adaptdl.torch._metrics import (
     profile_step_start, profile_step_commit,
     set_batch_size, get_goodput_fn, get_progress, _metrics_state)
-
 
 class ProfilingIterator(CountingIterator):
     def __init__(self, iterable, max_tokens, start=None, total=None):
@@ -46,6 +46,32 @@ class GlobalCountingIterator(CountingIterator):
             )
         self.n += self.num_replicas
         return x
+
+class AdaptiveDataLoader(DataLoader, AdaptiveDataLoaderMixin):
+    def __init__(self, dataset, max_tokens, shuffle=False, **kwargs):
+        super().__init__(dataset, **kwargs)
+        AdaptiveDataLoaderMixin.__init__(self, batch_size=max_tokens)
+    
+    def __iter__(self):
+        epoch = 0
+        num_replicas = 1
+        with self._elastic.context():
+            done = False
+            while not done:
+                max_tokens = self._elastic._sync_local_bsz()
+                print(max_tokens)
+                for idx, batch in enumerate(super().__iter__()):
+                    with self._elastic.profile(self.training and idx >= 1):
+                        yield batch
+                        if self._elastic.max_batch_size is not None and \
+                                get_progress() >= len(self.dataset) * \
+                                (epoch + 1) / self.batch_size:
+                            done = True
+                            break
+                if self._elastic.max_batch_size is None:
+                    done = True
+                self._elastic.current_index -= \
+                    self._elastic.current_index % -len(self.dataset)
 
 
 class ElasticEpochBatchIterator(EpochBatchIterator):
@@ -117,8 +143,9 @@ class ElasticEpochBatchIterator(EpochBatchIterator):
             os.environ["PYTHONWARNINGS"] = "ignore:semaphore_tracker:UserWarning"
 
         # Create data loader
-        itr = torch.utils.data.DataLoader(
+        itr = AdaptiveDataLoader(
             self.dataset,
+            self.max_tokens * self.num_workers,  # batch_size proxy
             collate_fn=self.collate_fn,
             batch_sampler=batches,
             num_workers=self.num_workers,
@@ -138,8 +165,6 @@ class ElasticEpochBatchIterator(EpochBatchIterator):
             total_num_itrs = len(batches) - 1
             itr.take(total_num_itrs)
             logger.info(f"skip final residual batch, total_num_itrs = {total_num_itrs}")
-
-        itr = ProfilingIterator(itr, self.max_tokens, itr.n)
 
         return itr
     

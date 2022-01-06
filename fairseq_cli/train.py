@@ -150,6 +150,10 @@ def main(cfg: FairseqConfig) -> None:
             cfg.distributed_training.distributed_world_size
         )
     )
+
+    if trainer.is_adatpdl:
+        trainer.wrap_adaptdl()
+
     logger.info(
         "max tokens per device = {} and max sentences per device = {}".format(
             cfg.dataset.max_tokens,
