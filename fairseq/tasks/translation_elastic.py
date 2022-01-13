@@ -11,6 +11,7 @@ import os
 from typing import Optional
 from argparse import Namespace
 from omegaconf import II
+from tensorboardX import SummaryWriter
 
 import torch
 import numpy as np
@@ -36,6 +37,12 @@ from fairseq.tasks.translation import (
     load_langpair_dataset,
 )
 from fairseq.optim.amp_optimizer import AMPOptimizer
+import adaptdl.env
+from adaptdl.torch.data import AdaptiveDataLoaderHelper, current_dataloader
+from adaptdl.torch._metrics import (
+    profile_step_start, profile_step_commit,
+    set_batch_size, get_goodput_fn, get_progress)
+from icecream import ic
 import pdb
 
 logger = logging.getLogger(__name__)
@@ -60,6 +67,7 @@ class ElasticTranslationTask(TranslationTask):
 
     def __init__(self, cfg: TranslationConfig, src_dict, tgt_dict):
         super().__init__(cfg, src_dict, tgt_dict)
+        self.writer = SummaryWriter("/tmp/tboard")
 
     def get_batch_iterator(
         self,
@@ -148,6 +156,7 @@ class ElasticTranslationTask(TranslationTask):
                 indices, dataset, max_positions, ignore_invalid_inputs
             )
 
+        self.max_tokens = max_tokens
         # create mini-batches with given size constraints
         batch_sampler = dataset.batch_by_size(
             indices,
@@ -202,6 +211,7 @@ class ElasticTranslationTask(TranslationTask):
         """
         model.train()
         model.set_num_updates(update_num)
+        profile_step_start(self.elastic.current_local_bsz)
         with torch.autograd.profiler.record_function("forward"):
             with torch.cuda.amp.autocast(enabled=(isinstance(optimizer, AMPOptimizer))):
                 loss, sample_size, logging_output = criterion(model, sample)
@@ -209,4 +219,37 @@ class ElasticTranslationTask(TranslationTask):
             loss *= 0
         with torch.autograd.profiler.record_function("backward"):
             optimizer.backward(loss)
+
         return loss, sample_size, logging_output
+    
+    def begin_epoch(self, epoch, model):
+        """Hook function called before the start of each epoch."""
+        AdaptiveDataLoaderHelper._current = None
+        self.elastic = AdaptiveDataLoaderHelper(batch_size=self.max_tokens)
+        self.elastic.autoscale_batch_size(self.max_tokens * 8, 
+                (self.max_tokens, self.max_tokens * 2), gradient_accumulation=True)
+        AdaptiveDataLoaderHelper._current = self.elastic
+        self.elastic.train()
+        batch_size = self.elastic._sync_local_bsz()
+        ic(batch_size)
+
+    def begin_valid_epoch(self, epoch, model):
+        """Hook function called before the start of each validation epoch."""
+        trainloader = current_dataloader()
+        trainloader.to_tensorboard(self.writer, epoch, tag_prefix="AdaptDL/Data/")
+
+    def optimizer_step(self, optimizer, model, update_num):
+        optimizer.step()
+        if update_num > 0:
+            profile_step_commit(self.elastic.is_accum_step())
+            self.elastic._accum_count = (0 if self.elastic.is_optim_step()
+                                 else self.elastic._accum_count + 1)
+
+            goodput_fn = None
+            if goodput_fn is not None:
+                suggest_goodput, atomic_bsz, accum_steps = goodput_fn.optimize(
+                    adaptdl.env.num_nodes(), adaptdl.env.num_replicas(),
+                    max_batch_size=self.elastic._max_batch_size,
+                    atomic_bsz_range=self.elastic._local_bsz_bounds,
+                    accumulation=self.elastic._gradient_accumulation)
+                ic(suggest_goodput, atomic_bsz, accum_steps) 
