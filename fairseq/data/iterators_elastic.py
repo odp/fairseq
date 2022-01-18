@@ -7,6 +7,9 @@ from torch.utils.data import DataLoader
 from fairseq.data import data_utils
 from contextlib import contextmanager
 import time
+from adaptdl.torch.data import AdaptiveDataLoaderHelper, current_dataloader
+
+from icecream import ic
 import pdb
 
 
@@ -14,9 +17,17 @@ from adaptdl.torch.data import AdaptiveDataLoaderMixin
 from adaptdl.torch._metrics import (
     profile_step_start, profile_step_commit,
     set_batch_size, get_goodput_fn, get_progress, _metrics_state)
+    
+def gen():
+    for i in range(0, 283):
+        yield max(i, 0)
+G = gen()
+
+def get_progress3():
+    return next(G)
 
 class ProfilingIterator(CountingIterator):
-    def __init__(self, iterable, max_tokens, start=None, total=None):
+    def __init__(self, iterable, max_tokens, start=0, total=None):
         assert max_tokens is not None
         self.start = start
         self.max_tokens = max_tokens
@@ -29,11 +40,17 @@ class ProfilingIterator(CountingIterator):
         profile_step_start(self.max_tokens)
         return batch    
 
+    def has_next(self):
+        return iterable.has_next()
+
+
 class GlobalCountingIterator(CountingIterator):
     def __init__(self, iterable, num_replicas=1, start=None, total=None):
         self.num_replicas = num_replicas
+        self.n = 0
+        self.elastic = AdaptiveDataLoaderHelper(batch_size=3000)
         super().__init__(iterable, start, len(iterable) * self.num_replicas)
-
+        
     def __next__(self):
         if not self.has_next():
             raise StopIteration
@@ -42,16 +59,69 @@ class GlobalCountingIterator(CountingIterator):
         except StopIteration:
             raise IndexError(
                 f"Iterator expected to have length {self.total}, "
-                "but exhausted at position {self.n}."
+                f"but exhausted at position {self.n}."
             )
         self.n += self.num_replicas
         return x
+    
+    def has_next(self):
+        """Whether the iterator has been exhausted."""
+        has_more = self.n < self.total
+        return has_more
+
+class AdaptiveIterator(CountingIterator):
+    def __init__(self, iterable, epoch=0, num_replicas=1, start=0, max_tokens=0):
+        self.iterable = iterable
+        self.num_replicas = num_replicas
+        self.start = start
+        self.epoch = epoch
+        self.max_tokens = max_tokens
+        self.elastic = AdaptiveDataLoaderHelper(self.max_tokens)
+        super().__init__(self.iterable, 0, len(self.iterable) * self.num_replicas)
+        AdaptiveDataLoaderHelper._current = self.elastic
+        batch_size = self.elastic._sync_local_bsz()
+        
+    @property
+    def done(self):
+        if self.elastic.max_batch_size is None:
+            return True
+        if self.elastic.max_batch_size is not None and \
+                get_progress() >= len(self.iterable.batch_sampler) * self.epoch:
+            self.n = self.total
+            return True
+        else:
+            return False
+
+    def __next__(self):
+        if not self.has_next():
+            raise StopIteration
+        if self.elastic.training and self.n > self.start + 1:
+            profile_step_commit(self.elastic.is_accum_step())
+            self.elastic._accum_count = (0 if self.elastic.is_optim_step()
+                                 else self.elastic._accum_count + 1)
+        x = next(self._itr)
+        self.n += self.num_replicas
+        if not self.done and not self.has_next(): # iter exhausted
+            # Replay the dataloader
+            super().__init__(self.iterable, 0, len(self.iterable) * self.num_replicas)
+            AdaptiveDataLoaderHelper._current = self.elastic
+            batch_size = self.elastic._sync_local_bsz()
+        profile_step_start(self.max_tokens)
+        return x
+
+    def has_next(self):
+        """Whether the iterator has been exhausted."""
+        if self.n < self.total:
+            return True
+        else:
+            AdaptiveDataLoaderHelper._current = None
+            return False
 
 class AdaptiveDataLoader(DataLoader, AdaptiveDataLoaderMixin):
     def __init__(self, dataset, max_tokens, shuffle=False, **kwargs):
         super().__init__(dataset, **kwargs)
         AdaptiveDataLoaderMixin.__init__(self, batch_size=max_tokens)
-    
+
     def __iter__(self):
         epoch = 0
         num_replicas = 1
@@ -59,19 +129,23 @@ class AdaptiveDataLoader(DataLoader, AdaptiveDataLoaderMixin):
             done = False
             while not done:
                 max_tokens = self._elastic._sync_local_bsz()
-                print(max_tokens)
                 for idx, batch in enumerate(super().__iter__()):
                     with self._elastic.profile(self.training and idx >= 1):
                         yield batch
-                        if self._elastic.max_batch_size is not None and \
-                                get_progress() >= len(self.dataset) * \
-                                (epoch + 1) / self.batch_size:
-                            done = True
-                            break
-                if self._elastic.max_batch_size is None:
-                    done = True
+                        self._elastic.current_index += 1
+#                        if self._elastic.max_batch_size is not None and \
+#                                get_progress() >= len(self.batch_sampler) * (epoch + 1):
+#                            done = True
+#                            ic()
+#                            break
+                    ic(idx, done)
+#                if self._elastic.max_batch_size is None:
+#                    done = True
                 self._elastic.current_index -= \
-                    self._elastic.current_index % -len(self.dataset)
+                    self._elastic.current_index % -len(self.batch_sampler)
+
+    def has_next(self):
+        return True
 
 
 class ElasticEpochBatchIterator(EpochBatchIterator):
@@ -96,6 +170,7 @@ class ElasticEpochBatchIterator(EpochBatchIterator):
         super().__init__(dataset, collate_fn, batch_sampler, seed, num_shards,
                 shard_id, num_workers, epoch, buffer_size, timeout,
                 disable_shuffling, skip_remainder_batch, grouped_shuffling)
+
 
     def _get_iterator_for_epoch(
         self, epoch, shuffle, fix_batches_to_gpus=False, offset=0
@@ -143,21 +218,17 @@ class ElasticEpochBatchIterator(EpochBatchIterator):
             os.environ["PYTHONWARNINGS"] = "ignore:semaphore_tracker:UserWarning"
 
         # Create data loader
-        itr = AdaptiveDataLoader(
+        itr = torch.utils.data.DataLoader(
             self.dataset,
-            self.max_tokens * self.num_workers,  # batch_size proxy
             collate_fn=self.collate_fn,
             batch_sampler=batches,
             num_workers=self.num_workers,
             timeout=self.timeout,
             pin_memory=True,
+            prefetch_factor=self.buffer_size
         )
-
-        # Wrap with a BufferedIterator if needed
-        if self.buffer_size > 0:
-            itr = BufferedIterator(self.buffer_size, itr)
-
-        itr = GlobalCountingIterator(itr, self.num_shards, offset)
+        
+        itr = AdaptiveIterator(itr, epoch, self.num_shards, offset, self.max_tokens)
 
         if self.skip_remainder_batch:
             # TODO: Below is a lazy implementation which discard the final batch regardless
@@ -168,6 +239,13 @@ class ElasticEpochBatchIterator(EpochBatchIterator):
 
         return itr
     
+    def __len__(self):
+        return int(math.ceil(len(self.frozen_batches) / float(self.num_shards)))
+
+    def end_of_epoch(self) -> bool:
+        """Returns whether the most recent epoch iterator has been exhausted"""
+        return not self._cur_epoch_itr.has_next()
+
     def state_dict(self):
         """Returns a dictionary containing a whole state of the iterator."""
         if self.end_of_epoch():

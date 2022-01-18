@@ -83,7 +83,7 @@ class ElasticTranslationTask(TranslationTask):
         num_workers=0,
         epoch=1,
         data_buffer_size=0,
-        disable_iterator_cache=False,
+        disable_iterator_cache=True,
         skip_remainder_batch=False,
         grouped_shuffling=False,
         update_epoch_batch_itr=False,
@@ -132,15 +132,6 @@ class ElasticTranslationTask(TranslationTask):
             ~fairseq.iterators.EpochBatchIterator: a batched iterator over the
                 given dataset split
         """
-        can_reuse_epoch_itr = (
-            not disable_iterator_cache
-            and not update_epoch_batch_itr
-            and self.can_reuse_epoch_itr(dataset)
-        )
-        if can_reuse_epoch_itr and dataset in self.dataset_to_epoch_iter:
-            logger.debug("reusing EpochBatchIterator for epoch {}".format(epoch))
-            return self.dataset_to_epoch_iter[dataset]
-
         assert isinstance(dataset, FairseqDataset)
 
         # initialize the dataset with the correct starting epoch
@@ -181,8 +172,7 @@ class ElasticTranslationTask(TranslationTask):
             grouped_shuffling=grouped_shuffling,
         )
 
-        if can_reuse_epoch_itr:
-            self.dataset_to_epoch_iter[dataset] = epoch_iter
+        self.dataset_to_epoch_iter[dataset] = epoch_iter
 
         return epoch_iter
 
@@ -211,7 +201,6 @@ class ElasticTranslationTask(TranslationTask):
         """
         model.train()
         model.set_num_updates(update_num)
-        profile_step_start(self.elastic.current_local_bsz)
         with torch.autograd.profiler.record_function("forward"):
             with torch.cuda.amp.autocast(enabled=(isinstance(optimizer, AMPOptimizer))):
                 loss, sample_size, logging_output = criterion(model, sample)
@@ -221,35 +210,13 @@ class ElasticTranslationTask(TranslationTask):
             optimizer.backward(loss)
 
         return loss, sample_size, logging_output
-    
+
     def begin_epoch(self, epoch, model):
-        """Hook function called before the start of each epoch."""
-        AdaptiveDataLoaderHelper._current = None
-        self.elastic = AdaptiveDataLoaderHelper(batch_size=self.max_tokens)
-        self.elastic.autoscale_batch_size(self.max_tokens * 8, 
-                (self.max_tokens, self.max_tokens * 2), gradient_accumulation=True)
-        AdaptiveDataLoaderHelper._current = self.elastic
-        self.elastic.train()
-        batch_size = self.elastic._sync_local_bsz()
-        ic(batch_size)
+        trainloader = current_dataloader()
+        trainloader.autoscale_batch_size(self.max_tokens * 4,
+                (self.max_tokens, self.max_tokens), gradient_accumulation=True)
+        trainloader.train()
 
     def begin_valid_epoch(self, epoch, model):
         """Hook function called before the start of each validation epoch."""
-        trainloader = current_dataloader()
-        trainloader.to_tensorboard(self.writer, epoch, tag_prefix="AdaptDL/Data/")
-
-    def optimizer_step(self, optimizer, model, update_num):
-        optimizer.step()
-        if update_num > 0:
-            profile_step_commit(self.elastic.is_accum_step())
-            self.elastic._accum_count = (0 if self.elastic.is_optim_step()
-                                 else self.elastic._accum_count + 1)
-
-            goodput_fn = None
-            if goodput_fn is not None:
-                suggest_goodput, atomic_bsz, accum_steps = goodput_fn.optimize(
-                    adaptdl.env.num_nodes(), adaptdl.env.num_replicas(),
-                    max_batch_size=self.elastic._max_batch_size,
-                    atomic_bsz_range=self.elastic._local_bsz_bounds,
-                    accumulation=self.elastic._gradient_accumulation)
-                ic(suggest_goodput, atomic_bsz, accum_steps) 
+        pass
