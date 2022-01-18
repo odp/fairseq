@@ -19,11 +19,13 @@ from adaptdl.torch._metrics import (
     set_batch_size, get_goodput_fn, get_progress, _metrics_state)
     
 def gen():
-    for i in range(0, 283):
+    i = 0
+    while True:
         yield max(i, 0)
+        i += 1
 G = gen()
 
-def get_progress3():
+def get_progress4():
     return next(G)
 
 class ProfilingIterator(CountingIterator):
@@ -95,10 +97,10 @@ class AdaptiveIterator(CountingIterator):
     def __next__(self):
         if not self.has_next():
             raise StopIteration
-        if self.elastic.training and self.n > self.start + 1:
+        if self.elastic.training and self.n >= 1:
             profile_step_commit(self.elastic.is_accum_step())
             self.elastic._accum_count = (0 if self.elastic.is_optim_step()
-                                 else self.elastic._accum_count + 1)
+                                         else self.elastic._accum_count + 1)
         x = next(self._itr)
         self.n += self.num_replicas
         if not self.done and not self.has_next(): # iter exhausted
@@ -115,6 +117,7 @@ class AdaptiveIterator(CountingIterator):
             return True
         else:
             AdaptiveDataLoaderHelper._current = None
+            AdaptiveDataLoaderHelper._training = None
             return False
 
 class AdaptiveDataLoader(DataLoader, AdaptiveDataLoaderMixin):
