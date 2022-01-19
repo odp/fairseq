@@ -719,6 +719,9 @@ class Trainer(object):
     def begin_valid_epoch(self, epoch):
         """Called at the beginning of each validation epoch."""
 
+        if self.is_adatpdl:
+            self.model.to_tensorboard(self.task.writer, epoch, tag_prefix="AdaptDL/Model/")
+
         # task specific setup per validation epoch
         self.task.begin_valid_epoch(epoch, self.get_model())
 

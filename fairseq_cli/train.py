@@ -38,7 +38,9 @@ from fairseq.file_io import PathManager
 from fairseq.logging import meters, metrics, progress_bar
 from fairseq.model_parallel.megatron_trainer import MegatronTrainer
 from fairseq.trainer import Trainer
-
+from adaptdl.torch.data import AdaptiveDataLoaderHelper, current_dataloader
+from icecream import ic
+import pdb
 
 def main(cfg: FairseqConfig) -> None:
     if isinstance(cfg, argparse.Namespace):
@@ -190,6 +192,7 @@ def main(cfg: FairseqConfig) -> None:
 
         # train for one epoch
         valid_losses, should_stop = train(cfg, trainer, task, epoch_itr)
+        # [0.0], False
         if should_stop:
             break
 
@@ -203,6 +206,7 @@ def main(cfg: FairseqConfig) -> None:
             # don't cache epoch iterators for sharded datasets
             disable_iterator_cache=task.has_sharded_data("train"),
         )
+
     train_meter.stop()
     logger.info("done training in {:.1f} seconds".format(train_meter.sum))
 
@@ -259,11 +263,6 @@ def train(
         if epoch_itr.epoch <= len(cfg.optimization.update_freq)
         else cfg.optimization.update_freq[-1]
     )
-    itr = iterators.GroupedIterator(
-        itr,
-        update_freq,
-        skip_remainder_batch=cfg.optimization.skip_remainder_batch,
-    )
     if cfg.common.tpu:
         itr = utils.tpu_data_loader(itr)
     progress = progress_bar.progress_bar(
@@ -304,7 +303,7 @@ def train(
         with metrics.aggregate("train_inner"), torch.autograd.profiler.record_function(
             "train_step-%d" % i
         ):
-            log_output = trainer.train_step(samples)
+            log_output = trainer.train_step([samples])
 
         if log_output is not None:  # not OOM, overflow, ...
             # log mid-epoch stats
