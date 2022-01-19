@@ -7,7 +7,7 @@ from torch.utils.data import DataLoader
 from fairseq.data import data_utils
 from contextlib import contextmanager
 import time
-from adaptdl.torch.data import AdaptiveDataLoaderHelper, current_dataloader
+from adaptdl.torch.data import AdaptiveDataLoaderHelper, current_dataloader, _AdaptiveDataLoaderState
 
 from icecream import ic
 import pdb
@@ -25,7 +25,7 @@ def gen():
         i += 1
 G = gen()
 
-def get_progress4():
+def get_progress_alt():
     return next(G)
 
 class ProfilingIterator(CountingIterator):
@@ -71,6 +71,14 @@ class GlobalCountingIterator(CountingIterator):
         has_more = self.n < self.total
         return has_more
 
+_ELASTIC_STATE = None
+
+def elastic_state():
+    global _ELASTIC_STATE
+    if _ELASTIC_STATE is None:
+        _ELASTIC_STATE = _AdaptiveDataLoaderState()
+    return _ELASTIC_STATE
+        
 class AdaptiveIterator(CountingIterator):
     def __init__(self, iterable, epoch=0, num_replicas=1, start=0, max_tokens=0):
         self.iterable = iterable
@@ -79,9 +87,10 @@ class AdaptiveIterator(CountingIterator):
         self.epoch = epoch
         self.max_tokens = max_tokens
         self.elastic = AdaptiveDataLoaderHelper(self.max_tokens)
+        # ALL dataloaders MUST share same self.elastic._state
+        self.elastic._state = elastic_state()
         super().__init__(self.iterable, 0, len(self.iterable) * self.num_replicas)
         AdaptiveDataLoaderHelper._current = self.elastic
-        batch_size = self.elastic._sync_local_bsz()
         
     @property
     def done(self):
@@ -95,6 +104,8 @@ class AdaptiveIterator(CountingIterator):
             return False
 
     def __next__(self):
+        if self.elastic.training and self.n == 0: # before first batch
+            batch_size = self.elastic._sync_local_bsz()
         if not self.has_next():
             raise StopIteration
         if self.elastic.training and self.n >= 1:
@@ -107,7 +118,6 @@ class AdaptiveIterator(CountingIterator):
             # Replay the dataloader
             super().__init__(self.iterable, 0, len(self.iterable) * self.num_replicas)
             AdaptiveDataLoaderHelper._current = self.elastic
-            batch_size = self.elastic._sync_local_bsz()
         profile_step_start(self.max_tokens)
         return x
 
@@ -116,6 +126,8 @@ class AdaptiveIterator(CountingIterator):
         if self.n < self.total:
             return True
         else:
+            self.elastic._state.current_index = 0
+            self.elastic._state.end_index = 0
             AdaptiveDataLoaderHelper._current = None
             AdaptiveDataLoaderHelper._training = None
             return False
