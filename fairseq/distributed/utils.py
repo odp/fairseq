@@ -337,7 +337,9 @@ def call_main(cfg: FairseqConfig, main, **kwargs):
         infer_init_method(cfg.distributed_training)
 
     if cfg.distributed_training.ddp_backend == "adaptdl":
-        adaptdl.torch.init_process_group("nccl" if torch.cuda.is_available() else "gloo")
+        adaptdl.torch.init_process_group("nccl" if torch.cuda.is_available() else "gloo",
+                                         world_size=cfg.distributed_training.distributed_world_size,
+                                         rank=cfg.distributed_training.distributed_rank)
         distributed_main(cfg.distributed_training.device_id, main, cfg, kwargs)
     elif cfg.distributed_training.distributed_init_method is not None:
         # distributed training
