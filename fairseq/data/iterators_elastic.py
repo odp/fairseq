@@ -121,6 +121,9 @@ class AdaptiveIterator(CountingIterator):
         profile_step_start(self.max_tokens)
         return x
 
+    def __len__(self):
+        return len(self.iterable.batch_sampler)
+
     def has_next(self):
         """Whether the iterator has been exhausted."""
         if self.n < self.total:
