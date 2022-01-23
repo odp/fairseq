@@ -96,8 +96,8 @@ class AdaptiveIterator(CountingIterator):
     def done(self):
         if self.elastic.max_batch_size is None:
             return True
-        if self.elastic.max_batch_size is not None and \
-                get_progress() >= len(self.iterable.batch_sampler) * self.epoch:
+        if get_progress() >= (len(self.iterable.batch_sampler) *
+                self.num_replicas * self.epoch):
             self.n = self.total
             return True
         else:

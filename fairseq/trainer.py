@@ -882,7 +882,8 @@ class Trainer(object):
             if not self.tpu:
                 if (
                     not self.cfg.optimization.use_bmuf
-                    and self.cfg.distributed_training.ddp_backend != "slowmo"
+                    and self.cfg.distributed_training.ddp_backend \
+                    not in ("slowmo", "adaptdl")
                 ):
                     self._check_grad_norms(grad_norm)
                 if not torch.isfinite(grad_norm).all():
