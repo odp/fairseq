@@ -86,7 +86,7 @@ class AdaptiveIterator(CountingIterator):
         self.start = start
         self.epoch = epoch
         self.max_tokens = max_tokens
-        self.elastic = AdaptiveDataLoaderHelper(self.max_tokens)
+        self.elastic = AdaptiveDataLoaderHelper(self.max_tokens * self.num_replicas)
         # ALL dataloaders MUST share same self.elastic._state
         self.elastic._state = elastic_state()
         super().__init__(self.iterable, 0, len(self.iterable) * self.num_replicas)
