@@ -379,7 +379,7 @@ class Trainer(object):
         wrapped_model = adl.AdaptiveDataParallel(self.get_model().to(self.device),
                                                  self.optimizer.optimizer,
                                                  self.lr_scheduler,
-                                                 scaling_rule=AdaScale())
+                                                 scaling_rule=AdamScale())
         self._wrapped_model = ModuleProxyWrapper(wrapped_model)
 
     def consolidate_optimizer(self):

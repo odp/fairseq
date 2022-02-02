@@ -25,51 +25,9 @@ def gen():
         i += 1
 G = gen()
 
-def get_progress_alt():
+def get_progress_test():
     return next(G)
 
-class ProfilingIterator(CountingIterator):
-    def __init__(self, iterable, max_tokens, start=0, total=None):
-        assert max_tokens is not None
-        self.start = start
-        self.max_tokens = max_tokens
-        super().__init__(iterable, start, total)
-
-    def __next__(self):
-        if self.n > self.start:
-            profile_step_commit(False)
-        batch = super().__next__()
-        profile_step_start(self.max_tokens)
-        return batch    
-
-    def has_next(self):
-        return iterable.has_next()
-
-
-class GlobalCountingIterator(CountingIterator):
-    def __init__(self, iterable, num_replicas=1, start=None, total=None):
-        self.num_replicas = num_replicas
-        self.n = 0
-        self.elastic = AdaptiveDataLoaderHelper(batch_size=3000)
-        super().__init__(iterable, start, len(iterable) * self.num_replicas)
-        
-    def __next__(self):
-        if not self.has_next():
-            raise StopIteration
-        try:
-            x = next(self._itr)
-        except StopIteration:
-            raise IndexError(
-                f"Iterator expected to have length {self.total}, "
-                f"but exhausted at position {self.n}."
-            )
-        self.n += self.num_replicas
-        return x
-    
-    def has_next(self):
-        """Whether the iterator has been exhausted."""
-        has_more = self.n < self.total
-        return has_more
 
 _ELASTIC_STATE = None
 
@@ -96,8 +54,7 @@ class AdaptiveIterator(CountingIterator):
     def done(self):
         if self.elastic.max_batch_size is None:
             return True
-        if get_progress() >= (len(self.iterable.batch_sampler) *
-                self.num_replicas * self.epoch):
+        if get_progress() >= (len(self.iterable.batch_sampler) * self.epoch):
             self.n = self.total
             return True
         else:
@@ -118,6 +75,7 @@ class AdaptiveIterator(CountingIterator):
             # Replay the dataloader
             super().__init__(self.iterable, 0, len(self.iterable) * self.num_replicas)
             AdaptiveDataLoaderHelper._current = self.elastic
+            AdaptiveDataLoaderHelper._training = self.elastic
         profile_step_start(self.max_tokens)
         return x
 
@@ -134,37 +92,6 @@ class AdaptiveIterator(CountingIterator):
             AdaptiveDataLoaderHelper._current = None
             AdaptiveDataLoaderHelper._training = None
             return False
-
-class AdaptiveDataLoader(DataLoader, AdaptiveDataLoaderMixin):
-    def __init__(self, dataset, max_tokens, shuffle=False, **kwargs):
-        super().__init__(dataset, **kwargs)
-        AdaptiveDataLoaderMixin.__init__(self, batch_size=max_tokens)
-
-    def __iter__(self):
-        epoch = 0
-        num_replicas = 1
-        with self._elastic.context():
-            done = False
-            while not done:
-                max_tokens = self._elastic._sync_local_bsz()
-                for idx, batch in enumerate(super().__iter__()):
-                    with self._elastic.profile(self.training and idx >= 1):
-                        yield batch
-                        self._elastic.current_index += 1
-#                        if self._elastic.max_batch_size is not None and \
-#                                get_progress() >= len(self.batch_sampler) * (epoch + 1):
-#                            done = True
-#                            ic()
-#                            break
-                    ic(idx, done)
-#                if self._elastic.max_batch_size is None:
-#                    done = True
-                self._elastic.current_index -= \
-                    self._elastic.current_index % -len(self.batch_sampler)
-
-    def has_next(self):
-        return True
-
 
 class ElasticEpochBatchIterator(EpochBatchIterator):
     def __init__(
@@ -243,7 +170,8 @@ class ElasticEpochBatchIterator(EpochBatchIterator):
             num_workers=self.num_workers,
             timeout=self.timeout,
             pin_memory=True,
-            prefetch_factor=self.buffer_size
+            prefetch_factor=self.buffer_size,
+            persistent_workers=True
         )
         
         itr = AdaptiveIterator(itr, epoch, self.num_shards, offset, self.max_tokens)
