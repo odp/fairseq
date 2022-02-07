@@ -214,8 +214,8 @@ class ElasticTranslationTask(TranslationTask):
 
     def begin_epoch(self, epoch, model):
         trainloader = current_dataloader()
-        trainloader.autoscale_batch_size(self.max_tokens * 4,
-                (self.max_tokens, self.max_tokens), gradient_accumulation=True)
+        trainloader.autoscale_batch_size(self.max_tokens * 16,
+                (self.max_tokens, self.max_tokens * 8), gradient_accumulation=True)
 
     def begin_valid_epoch(self, epoch, model):
         """Hook function called before the start of each validation epoch."""
