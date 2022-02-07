@@ -379,10 +379,12 @@ class Trainer(object):
         import adaptdl.torch as adl
         from adaptdl.torch.scaling_rules import AdaScale, AdamScale
         from fairseq.distributed import ModuleProxyWrapper
+        self.optimizer.scaler.get_scale = lambda: self.optimizer.scaler.loss_scale
         wrapped_model = adl.AdaptiveDataParallel(self.get_model().to(self.device),
                                                  self.optimizer.optimizer,
                                                  self.lr_scheduler,
-                                                 scaling_rule=AdamScale())
+                                                 scaling_rule=AdamScale(),
+                                                 mp_scaler=self.optimizer.scaler)
         self.optimizer.zero_grad = self.optimizer.optimizer.zero_grad
         self._wrapped_model = ModuleProxyWrapper(wrapped_model)
 
