@@ -17,7 +17,10 @@ from adaptdl.torch.data import AdaptiveDataLoaderMixin
 from adaptdl.torch._metrics import (
     profile_step_start, profile_step_commit,
     set_batch_size, get_goodput_fn, get_progress, _metrics_state)
-    
+
+import logging
+logger = logging.getLogger(__name__)
+
 def gen():
     i = 0
     while True:
@@ -27,7 +30,6 @@ G = gen()
 
 def get_progress_test():
     return next(G)
-
 
 _ELASTIC_STATE = None
 
@@ -45,6 +47,7 @@ class AdaptiveIterator(CountingIterator):
         self.epoch = epoch
         self.max_tokens = max_tokens
         self.elastic = AdaptiveDataLoaderHelper(self.max_tokens * self.num_replicas)
+        assert self.elastic._accum_count == 0
         # ALL dataloaders MUST share same self.elastic._state
         self.elastic._state = elastic_state()
         super().__init__(self.iterable, 0, len(self.iterable) * self.num_replicas)
@@ -64,15 +67,19 @@ class AdaptiveIterator(CountingIterator):
         if self.elastic.training and self.n == 0: # before first batch
             batch_size = self.elastic._sync_local_bsz()
         if not self.has_next():
-            raise StopIteration
-        if self.elastic.training and self.n >= 1:
+            raise StopIteration  # Mostly for Valid iterators
+
+        if self.elastic.training and self.n >= self.num_replicas:
             profile_step_commit(self.elastic.is_accum_step())
+
+        if self.elastic.training:
             self.elastic._accum_count = (0 if self.elastic.is_optim_step()
                                          else self.elastic._accum_count + 1)
         x = next(self._itr)
         self.n += self.num_replicas
         if not self.done and not self.has_next(): # iter exhausted
             # Replay the dataloader
+            logger.info(f"Replaying DataLoader at progress: {get_progress()}")
             super().__init__(self.iterable, 0, len(self.iterable) * self.num_replicas)
             AdaptiveDataLoaderHelper._current = self.elastic
             AdaptiveDataLoaderHelper._training = self.elastic

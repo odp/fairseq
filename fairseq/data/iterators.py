@@ -217,6 +217,7 @@ class StreamingEpochBatchIterator(EpochBatchIterating):
             timeout=self.timeout,
             worker_init_fn=worker_init_fn,
             pin_memory=True,
+            persistent_workers=True
         )
 
         # Wrap with a BufferedIterator if needed
@@ -494,6 +495,7 @@ class EpochBatchIterator(EpochBatchIterating):
             num_workers=self.num_workers,
             timeout=self.timeout,
             pin_memory=True,
+            persistent_workers=True
         )
 
         # Wrap with a BufferedIterator if needed
@@ -812,6 +814,7 @@ class GroupedEpochBatchIterator(EpochBatchIterator):
             collate_fn=self.collate_fn,
             batch_sampler=batches[offset:],
             num_workers=self.num_workers,
+            persistent_workers=True
         )
         if self.buffer_size > 0:
             itr = BufferedIterator(self.buffer_size, itr)

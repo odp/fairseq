@@ -39,6 +39,7 @@ from fairseq.logging import meters, metrics, progress_bar
 from fairseq.model_parallel.megatron_trainer import MegatronTrainer
 from fairseq.trainer import Trainer
 from adaptdl.torch.data import AdaptiveDataLoaderHelper, current_dataloader
+from tensorboardX import SummaryWriter
 from icecream import ic
 import pdb
 
@@ -247,6 +248,7 @@ def should_stop_early(cfg: DictConfig, valid_loss: float) -> bool:
         else:
             return False
 
+GLOBAL_STEP = 0
 
 @metrics.aggregate("train")
 def train(
@@ -320,7 +322,15 @@ def train(
         valid_losses, should_stop = validate_and_save(
             cfg, trainer, task, epoch_itr, valid_subsets, end_of_epoch
         )
-
+        if trainer.is_adatpdl and trainer.cfg.distributed_training.distributed_rank == 0:
+            if trainer._writer is None:
+               import uuid
+               tbdir = f"/home/ab1/tb/{uuid.uuid4().hex.upper()[0:6]}"
+               logger.info(f"TB log dir {tbdir}")
+               trainer._writer = SummaryWriter(tbdir)
+            global GLOBAL_STEP
+            trainer.model.to_tensorboard(trainer._writer, GLOBAL_STEP, tag_prefix="AdaptDL/Model/")
+            GLOBAL_STEP += 1
         if should_stop:
             break
 

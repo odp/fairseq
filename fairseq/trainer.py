@@ -27,6 +27,8 @@ from fairseq.nan_detector import NanDetector
 from fairseq.optim import lr_scheduler
 from omegaconf import OmegaConf
 
+from adaptdl.torch._metrics import get_progress
+
 logger = logging.getLogger(__name__)
 
 
@@ -48,6 +50,7 @@ class Trainer(object):
             )
             cfg = convert_namespace_to_omegaconf(cfg)
 
+        self._writer = None  # TB writer for AdaptDL
         self.cfg = cfg
         self.task = task
 
@@ -380,6 +383,7 @@ class Trainer(object):
                                                  self.optimizer.optimizer,
                                                  self.lr_scheduler,
                                                  scaling_rule=AdamScale())
+        self.optimizer.zero_grad = self.optimizer.optimizer.zero_grad
         self._wrapped_model = ModuleProxyWrapper(wrapped_model)
 
     def consolidate_optimizer(self):
@@ -720,10 +724,6 @@ class Trainer(object):
 
     def begin_valid_epoch(self, epoch):
         """Called at the beginning of each validation epoch."""
-
-        if self.is_adatpdl:
-            self.model.to_tensorboard(self.task.writer, epoch, tag_prefix="AdaptDL/Model/")
-
         # task specific setup per validation epoch
         self.task.begin_valid_epoch(epoch, self.get_model())
 
@@ -854,24 +854,25 @@ class Trainer(object):
                 if utils.has_parameters(self.criterion):
                     self.optimizer.all_reduce_grads(self.criterion)
 
-            with torch.autograd.profiler.record_function("multiply-grads"):
-                # multiply gradients by (data_parallel_size / sample_size) since
-                # DDP normalizes by the number of data parallel workers for
-                # improved fp16 precision.
-                # Thus we get (sum_of_gradients / sample_size) at the end.
-                # In case of fp16, this step also undoes loss scaling.
-                # (Debugging note: Some optimizers perform this scaling on the
-                # fly, so inspecting model.parameters() or optimizer.params may
-                # still show the original, unscaled gradients.)
-                numer = (
-                    self.data_parallel_world_size
-                    if not self.cfg.optimization.use_bmuf or self._sync_stats()
-                    else 1
-                )
-                self.optimizer.multiply_grads(numer / (sample_size or 1.0))
-                # Note: (sample_size or 1.0) handles the case of a zero gradient, in a
-                # way that avoids CPU/device transfers in case sample_size is a GPU or
-                # TPU object. The assumption is that the gradient itself is also 0.
+            if not self.is_adatpdl:
+                with torch.autograd.profiler.record_function("multiply-grads"):
+                    # multiply gradients by (data_parallel_size / sample_size) since
+                    # DDP normalizes by the number of data parallel workers for
+                    # improved fp16 precision.
+                    # Thus we get (sum_of_gradients / sample_size) at the end.
+                    # In case of fp16, this step also undoes loss scaling.
+                    # (Debugging note: Some optimizers perform this scaling on the
+                    # fly, so inspecting model.parameters() or optimizer.params may
+                    # still show the original, unscaled gradients.)
+                    numer = (
+                        self.data_parallel_world_size
+                        if not self.cfg.optimization.use_bmuf or self._sync_stats()
+                        else 1
+                    )
+                    self.optimizer.multiply_grads(numer / (sample_size or 1.0))
+                    # Note: (sample_size or 1.0) handles the case of a zero gradient, in a
+                    # way that avoids CPU/device transfers in case sample_size is a GPU or
+                    # TPU object. The assumption is that the gradient itself is also 0.
 
             with torch.autograd.profiler.record_function("clip-grads"):
                 # clip grads
@@ -1118,7 +1119,11 @@ class Trainer(object):
 
     def lr_step_update(self):
         """Update the learning rate after each update."""
-        new_lr = self.lr_scheduler.step_update(self.get_num_updates())
+        if self.is_adatpdl:
+            current_update = int(get_progress())
+        else:
+            current_update = self.get_num_updates()
+        new_lr = self.lr_scheduler.step_update(current_update)
         if isinstance(new_lr, dict):
             for k, v in new_lr.items():
                 metrics.log_scalar(f"lr_{k}", v, weight=0, priority=300)
