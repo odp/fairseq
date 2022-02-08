@@ -67,7 +67,6 @@ class ElasticTranslationTask(TranslationTask):
 
     def __init__(self, cfg: TranslationConfig, src_dict, tgt_dict):
         super().__init__(cfg, src_dict, tgt_dict)
-        self.writer = SummaryWriter("/tmp/tboard")
 
     def get_batch_iterator(
         self,

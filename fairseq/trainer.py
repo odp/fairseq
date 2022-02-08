@@ -540,6 +540,7 @@ class Trainer(object):
                 )
             extra_state = state["extra_state"]
             self._optim_history = state["optimizer_history"]
+            self.base_num_updates = self._optim_history[-1]["num_updates"]
 
         if last_optim_state is not None and not reset_optimizer:
             # rebuild optimizer after loading model, since params may have changed
@@ -1122,7 +1123,7 @@ class Trainer(object):
     def lr_step_update(self):
         """Update the learning rate after each update."""
         if self.is_adatpdl:
-            current_update = int(get_progress())
+            current_update = self.base_num_updates + int(get_progress())
         else:
             current_update = self.get_num_updates()
         new_lr = self.lr_scheduler.step_update(current_update)
