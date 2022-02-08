@@ -46,7 +46,7 @@ class AdaptiveIterator(CountingIterator):
         self.start = start
         self.epoch = epoch
         self.max_tokens = max_tokens
-        self.elastic = AdaptiveDataLoaderHelper(self.max_tokens * self.num_replicas)
+        self.elastic = AdaptiveDataLoaderHelper(self.max_tokens)
         assert self.elastic._accum_count == 0
         # ALL dataloaders MUST share same self.elastic._state
         self.elastic._state = elastic_state()
@@ -57,7 +57,7 @@ class AdaptiveIterator(CountingIterator):
     def done(self):
         if self.elastic.max_batch_size is None:
             return True
-        if get_progress() >= (len(self.iterable.batch_sampler) * self.epoch):
+        if get_progress() >= (len(self.iterable.batch_sampler) * self.epoch * self.num_replicas):
             self.n = self.total
             return True
         else:
