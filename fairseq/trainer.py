@@ -899,6 +899,9 @@ class Trainer(object):
                         # check local gradnorm single GPU case, trigger NanDetector
                         raise FloatingPointError("gradients are Nan/Inf")
 
+            if self._wrapped_model.require_backward_grad_sync:
+                self.optimizer.multiply_grads(1.0 / self.optimizer.scaler.loss_scale)
+
             with torch.autograd.profiler.record_function("optimizer"):
                 # take an optimization step
                 self.task.optimizer_step(
