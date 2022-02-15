@@ -53,6 +53,7 @@ class Trainer(object):
         self._writer = None  # TB writer for AdaptDL
         self.cfg = cfg
         self.task = task
+        self.base_num_updates = 0
 
         # catalog shared parameters
         shared_params = _catalog_shared_params(model)
@@ -387,6 +388,10 @@ class Trainer(object):
                                                  mp_scaler=self.optimizer.scaler)
         self.optimizer.zero_grad = self.optimizer.optimizer.zero_grad
         self._wrapped_model = ModuleProxyWrapper(wrapped_model)
+
+    @property
+    def is_optim_step(self):
+        return self.is_adatpdl and self._wrapped_model.require_backward_grad_sync
 
     def consolidate_optimizer(self):
         """For OSS, we need to consolidate the state dict."""
@@ -877,17 +882,25 @@ class Trainer(object):
                     # way that avoids CPU/device transfers in case sample_size is a GPU or
                     # TPU object. The assumption is that the gradient itself is also 0.
 
-            with torch.autograd.profiler.record_function("clip-grads"):
-                # clip grads
-                grad_norm = self.clip_grad_norm(self.cfg.optimization.clip_norm)
+                with torch.autograd.profiler.record_function("clip-grads"):
+                    # clip grads
+                    grad_norm = self.clip_grad_norm(self.cfg.optimization.clip_norm)
+            else:
+                grad_norm = torch.tensor(0.0).cuda()
+
+            if self.is_optim_step:
+                self.optimizer.multiply_grads(1.0 / self.optimizer.scaler.loss_scale)
+                with torch.autograd.profiler.record_function("clip-grads"):
+                    # clip grads
+                    grad_norm = self.clip_grad_norm(self.cfg.optimization.clip_norm)
 
             # check that grad norms are consistent across workers
             # on tpu check tensor is slow
             if not self.tpu:
                 if (
                     not self.cfg.optimization.use_bmuf
-                    and self.cfg.distributed_training.ddp_backend \
-                    not in ("slowmo", "adaptdl")
+                    and self.cfg.distributed_training.ddp_backend != "slowmo"
+                    and self.is_optim_step
                 ):
                     self._check_grad_norms(grad_norm)
                 if not torch.isfinite(grad_norm).all():
@@ -898,9 +911,6 @@ class Trainer(object):
                     else:
                         # check local gradnorm single GPU case, trigger NanDetector
                         raise FloatingPointError("gradients are Nan/Inf")
-
-            if self._wrapped_model.require_backward_grad_sync:
-                self.optimizer.multiply_grads(1.0 / self.optimizer.scaler.loss_scale)
 
             with torch.autograd.profiler.record_function("optimizer"):
                 # take an optimization step
