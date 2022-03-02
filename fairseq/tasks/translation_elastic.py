@@ -203,7 +203,7 @@ class ElasticTranslationTask(TranslationTask):
         with torch.autograd.profiler.record_function("forward"):
             with torch.cuda.amp.autocast(enabled=(isinstance(optimizer, AMPOptimizer))):
                 loss, sample_size, logging_output = criterion(model, sample)
-                loss /= sample_size
+                loss /= self.max_tokens
         if ignore_grad:
             loss *= 0
         with torch.autograd.profiler.record_function("backward"):
@@ -213,8 +213,8 @@ class ElasticTranslationTask(TranslationTask):
 
     def begin_epoch(self, epoch, model):
         trainloader = current_dataloader()
-        trainloader.autoscale_batch_size(self.max_tokens * 16,
-                (self.max_tokens, self.max_tokens * 8), gradient_accumulation=True)
+        trainloader.autoscale_batch_size(self.max_tokens * 1024,
+                (self.max_tokens, self.max_tokens), gradient_accumulation=True)
 
     def begin_valid_epoch(self, epoch, model):
         """Hook function called before the start of each validation epoch."""

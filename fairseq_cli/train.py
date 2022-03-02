@@ -329,7 +329,8 @@ def train(
                logger.info(f"TB log dir {tbdir}")
                trainer._writer = SummaryWriter(tbdir)
             global GLOBAL_STEP
-            trainer.model.to_tensorboard(trainer._writer, GLOBAL_STEP, tag_prefix="AdaptDL/Model/")
+            if GLOBAL_STEP % 100 == 0:
+                trainer.model.to_tensorboard(trainer._writer, GLOBAL_STEP, tag_prefix="AdaptDL/Model/")
             GLOBAL_STEP += 1
         if should_stop:
             break

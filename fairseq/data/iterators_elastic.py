@@ -9,9 +9,6 @@ from contextlib import contextmanager
 import time
 from adaptdl.torch.data import AdaptiveDataLoaderHelper, current_dataloader, _AdaptiveDataLoaderState
 
-from icecream import ic
-import pdb
-
 
 from adaptdl.torch.data import AdaptiveDataLoaderMixin
 from adaptdl.torch._metrics import (
@@ -52,6 +49,7 @@ class AdaptiveIterator(CountingIterator):
         self.elastic._state = elastic_state()
         super().__init__(self.iterable, 0, len(self.iterable) * self.num_replicas)
         AdaptiveDataLoaderHelper._current = self.elastic
+        self.steps_to_opt = 0
         
     @property
     def done(self):
@@ -75,6 +73,13 @@ class AdaptiveIterator(CountingIterator):
         if self.elastic.training:
             self.elastic._accum_count = (0 if self.elastic.is_optim_step()
                                          else self.elastic._accum_count + 1)
+
+        if self.elastic.training and self.elastic._accum_count == 0:
+            self.steps_to_opt += 1
+            if self.steps_to_opt == 50:
+                batch_size = self.elastic._sync_local_bsz()
+                self.steps_to_opt = 0
+
         x = next(self._itr)
         self.n += self.num_replicas
         if not self.done and not self.has_next(): # iter exhausted
