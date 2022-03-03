@@ -139,9 +139,6 @@ def _infer_slurm_init(cfg: DistributedTrainingConfig, num_pipelines_per_node):
 
 
 def _infer_single_node_init(cfg: DistributedTrainingConfig):
-    assert (
-        cfg.distributed_world_size <= torch.cuda.device_count()
-    ), f"world size is {cfg.distributed_world_size} but have {torch.cuda.device_count()} available devices"
     port = random.randint(10000, 20000)
     cfg.distributed_init_method = "tcp://localhost:{port}".format(port=port)
 
